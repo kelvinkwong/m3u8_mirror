@@ -12,6 +12,7 @@ import glob
 import hashlib
 import mmap
 import logging
+from datetime import datetime, timedelta
 
 def sha1sum(data):
     h = hashlib.sha1()
@@ -35,8 +36,9 @@ def get_cfg():
         return (argv[1], argv[2])
 
 def get_host(url):
-    urlgroup = urlparse(url)
-    return urlgroup.scheme + '://' + urlgroup.hostname
+    if url.startswith('http://') or url.startswith('https://'):
+        urlgroup = urlparse(url)
+        return urlgroup.scheme + '://' + urlgroup.hostname
 
 def get_m3u8_body(url):
     print('read m3u8 file:', url)
@@ -61,53 +63,74 @@ def manifest_parse_key(data):
     url = data.split(separator).pop().strip('"')
     return {'key': key, 'url': url, 'raw': data}
 
-def manifest_parse_fragment(host, manifest, index):
+def get_segment_count(key, segment_counter, timestamp):
+    if '#EXTINF' in key:
+        #EXTINF:6.00000,
+        segment_counter += 1
+        timestamp += timedelta(seconds = float(key[key.rfind(':')+1:-1]))
+    return segment_counter, timestamp
+
+def get_manifest_timestamp(key):
+    #EXT-X-PROGRAM-DATE-TIME:2022-10-11T23:45:50.840Z # UTC
+    timestamp = key[key.find(':')+1:]
+    timestamp = datetime.fromisoformat(timestamp[:-1])
+    return timestamp, {'key': key, 'timestamp': timestamp}
+
+def manifest_parse_fragment(host, manifest, index, segment_counter, timestamp):
     line = manifest[index]
     keys = []
     url = None
-    data = {'segment': 0, 'timestamp': 0}
+    data = {'segment_counter': segment_counter, 'timestamp': timestamp}
 
     if line.startswith('#'):
         keys.append(line)
         logging.debug(f'parsing: line0: {line}')
+        segment_counter, timestamp = get_segment_count(line, segment_counter, timestamp)
 
         index += 1
         while index < len(manifest):
-            logging.debug(f'parsing: indexN+1: {index}')
-            logging.debug(f'parsing: lineN+1: {line}')
             line = manifest[index]
+            logging.debug(f'parsing: index(N+1): {index}')
+            logging.debug(f'parsing: line(N+1): {line}')
             if line.startswith('#'):
                 keys.append(line)
                 index += 1
+                segment_counter, timestamp = get_segment_count(line, segment_counter, timestamp)
             else:
                 if not line.startswith('http'):
                     line = f'{host}/{url}'
 
                 data['key'] = keys
                 data['url'] = line
+                data['segment_counter'] = segment_counter
+                data['timestamp'] = timestamp
                 logging.debug(f'parsed: {data}')
-                return index, data
+                return index, data, segment_counter, timestamp
 
 def get_manifest_details(host, manifest):
     header = []
     body = []
-
+    segment_counter = 0
+    timestamp = datetime.fromtimestamp(0)
     index = 0
     manifest = manifest.split('\n')
     while index < len(manifest):
         line = manifest[index]
         if line in ['#EXTM3U']:
             header.append(line)
-        elif line[:line.rfind(':')] in ['#EXT-X-VERSION', '#EXT-X-TARGETDURATION', '#EXT-X-MEDIA-SEQUENCE', '#EXT-X-DISCONTINUITY-SEQUENCE']:
+        elif '#EXT-X-MEDIA-SEQUENCE' in line:
             header.append(line)
-
+            segment_counter = int(line[line.rfind(':')+1:])
+        elif line[:line.rfind(':')] in ['#EXT-X-VERSION', '#EXT-X-TARGETDURATION', '#EXT-X-DISCONTINUITY-SEQUENCE']:
+            header.append(line)
         elif '#EXT-X-KEY:METHOD=AES-128' in line:
             body.append(manifest_parse_key(line))
         elif '#EXT-X-PROGRAM-DATE-TIME' in line:
-            body.append({'key': line})
+            timestamp, parsed_key = get_manifest_timestamp(line)
+            body.append(parsed_key)
 
         elif line.startswith('#'):
-            index, parsed_manifest = manifest_parse_fragment(host, manifest, index)
+            index, parsed_manifest, segment_counter, timestamp = manifest_parse_fragment(host, manifest, index, segment_counter, timestamp)
             body.append(parsed_manifest)
         elif line == '':
             body.append({'key': 'KEL_NEWLINE'})
@@ -218,7 +241,14 @@ def check_dir(path):
             f.write('*')
 
 def get_download_url_list(host, m3u8_url, url_list = []):
-    body = get_m3u8_body(m3u8_url)
+    if m3u8_url.startswith('http://') or m3u8_url.startswith('https://'):
+        body = get_m3u8_body(m3u8_url)
+    else:
+        with open(m3u8_url, 'r') as f:
+            body = f.read()
+    # if True:
+    #     write_manifest('temp.m3u8', body)
+
     logging.debug(body)
     return get_manifest_details(host, body)
 
