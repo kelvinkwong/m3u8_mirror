@@ -41,39 +41,19 @@ def get_host(url):
 def get_m3u8_body(url):
     print('read m3u8 file:', url)
     session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=10)
+    adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=0)
     session.mount('http://', adapter)
     session.mount('https://', adapter)
-    r = session.get(url, timeout=10)
-    return r.text
 
-def get_url_list(host, body):
-    lines = body.split('\n')
-    ts_url_list = []
-    for line in lines:
-        if not line.startswith('#') and line != '':
-            if line.lower().startswith('http'):
-                ts_url_list.append(line)
-            else:
-                ts_url_list.append('%s/%s' % (host, line))
-    return ts_url_list
+    try:
+        r = session.get(url, timeout=10)
+    except requests.exceptions.RequestException as e:
+        raise SystemExit(e)
 
-# def get_manifest_details(host, manifest):
-#     header = []
-#     body = []
-#     for line in manifest.split('\n'):
-#         if line in ['#EXTM3U']:
-#             header.append(line)
-#         elif line[:line.rfind(':')] in ['#EXT-X-VERSION', '#EXT-X-TARGETDURATION', '#EXT-X-MEDIA-SEQUENCE', '#EXT-X-DISCONTINUITY-SEQUENCE']:
-#             header.append(line)
-#
-#         elif line.startswith('#') or line == '':
-#             body.append(line)
-#         elif line.lower().startswith('http'):
-#             body.append(line)
-#         else:
-#             body.append('%s/%s' % (host, line))
-#     return header, body
+    if r.ok:
+        return r.text
+    else:
+        exit_error(r.status_code, r.text)
 
 def manifest_parse_key(data):
     separator = 'URI='
@@ -81,13 +61,31 @@ def manifest_parse_key(data):
     url = data.split(separator).pop().strip('"')
     return {'key': key, 'url': url, 'raw': data}
 
-def manifest_parse_fragment(host, key, url):
-    logging.debug(f'host: {host}, key: {key}, url: {url}')
-    if not url.startswith('http'):
-        url = f'{host}/{url}'
-    data = {'key': key, 'url': url}
-    logging.debug(f'parsed: {data}')
-    return data
+def manifest_parse_fragment(host, manifest, index):
+    line = manifest[index]
+    keys = []
+    url = None
+    data = {}
+
+    if line.startswith('#'):
+        keys.append(line)
+        logging.debug(f'parsing: line0: {line}')
+
+        index += 1
+        while index < len(manifest):
+            logging.debug(f'parsing: indexN+1: {index}')
+            logging.debug(f'parsing: lineN+1: {line}')
+            line = manifest[index]
+            if line.startswith('#'):
+                keys.append(line)
+                index += 1
+            else:
+                if not line.startswith('http'):
+                    line = f'{host}/{url}'
+
+                data = {'key': keys, 'url': line}
+                logging.debug(f'parsed: {data}')
+                return index, data
 
 def get_manifest_details(host, manifest):
     header = []
@@ -102,15 +100,14 @@ def get_manifest_details(host, manifest):
         elif line[:line.rfind(':')] in ['#EXT-X-VERSION', '#EXT-X-TARGETDURATION', '#EXT-X-MEDIA-SEQUENCE', '#EXT-X-DISCONTINUITY-SEQUENCE']:
             header.append(line)
 
-        elif '#EXTINF' in line:
-            index += 1
-            next_line = manifest[index]
-            body.append(manifest_parse_fragment(host, line, next_line))
         elif '#EXT-X-KEY:METHOD=AES-128' in line:
             body.append(manifest_parse_key(line))
+        elif '#EXT-X-PROGRAM-DATE-TIME' in line:
+            body.append({'key': line})
 
         elif line.startswith('#'):
-            body.append({'key': line})
+            index, parsed_manifest = manifest_parse_fragment(host, manifest, index)
+            body.append(parsed_manifest)
         elif line == '':
             body.append({'key': 'KEL_NEWLINE'})
         else:
@@ -130,6 +127,9 @@ def write_manifest(filepath, data):
             f.write(d)
             f.write('\n')
 
+def findAnyStringInList(text, text_list):
+    return any(text in item for item in text_list)
+
 def mirror_manifest(header, body, download_dir):
     ts_path_list = []
     manifest = f'{download_dir}/manifest.m3u8'
@@ -141,40 +141,55 @@ def mirror_manifest(header, body, download_dir):
         key = line.get('key')
         url = line.get('url')
         logging.debug(f'parsed manifest line: {line}')
-        if '#EXTINF' in key:
+        if findAnyStringInList('#EXTINF', key):
             path = download_data(url, download_dir)
             if path is not None:
-                write_manifest(manifest, [key, path])
+                if isinstance(key, str):
+                    key = [key]
+                write_manifest(manifest, key + [path])
         elif '#EXT-X-KEY:METHOD=AES-128' in key:
             path = download_data(url, download_dir)
             write_manifest(manifest, [key + path])
         elif 'KEL_NEWLINE' in key:
             write_manifest(manifest, [''])
         else:
+            logging.debug(f'write as other: {line}')
             write_manifest(manifest, key)
 
 def download_data(url, download_dir):
+    logging.debug(f'starting downloading: {url}')
+
     if url.startswith('https://dai.google.com'):
-        path = download_googledai_data(url, download_dir, '%s/adpod_%s.ts')
+        if '/slate/' in url:
+            path = download_googledai_data(url, download_dir, '%s/slate_%s.ts')
+        else:
+            path = download_googledai_data(url, download_dir, '%s/adpod_%s.ts')
     elif 'serve.key' in url:
         path = download_googledai_data(url, download_dir, '%s/serve_%s.key')
     else:
         path = download_main_data(url, download_dir)
     return path
 
+def write_binary(path, data):
+    with open(path, 'wb') as f:
+        f.write(data)
+
+def exit_error(code, description):
+    logging.error(code)
+    logging.error(description)
+    raise SystemExit(code)
+
 def download_googledai_data(url, download_dir, filename_format):
-    r = requests.get(url)
     curr_path = filename_format % (download_dir, sha1sum(r.content))
 
-    print('\n[process]')
-    print('[download]:', url)
-    print('[target]:', curr_path)
-
     if os.path.isfile(curr_path):
-        print('[warn]: adpod/key file already exist')
+        logging.warning('adpod/key file already exist')
     else:
-        with open(curr_path, 'wb') as f:
-            f.write(r.content)
+        r = requests.get(url)
+        if r.ok:
+            write_binary(curr_path, r.content)
+        else:
+            exit_error(r.status_code, r.text)
     return curr_path
 
 def download_main_data(url, download_dir):
@@ -183,16 +198,14 @@ def download_main_data(url, download_dir):
         file_name = f'{file_name.split("?")[0]}'
     curr_path = '%s/%s' % (download_dir, file_name)
 
-    print('\n[process]')
-    print('[download]:', url)
-    print('[target]:', curr_path)
-
     if os.path.isfile(curr_path):
-        print('[warn]: file already exist')
+        logging.warning('file already exist')
     else:
         r = requests.get(url)
-        with open(curr_path, 'wb') as f:
-            f.write(r.content)
+        if r.ok:
+            write_binary(curr_path, r.content)
+        else:
+            exit_error(r.status_code, r.text)
         return curr_path
 
 def check_dir(path):
@@ -201,16 +214,6 @@ def check_dir(path):
 
         with open(f'{path}/.gitignore', 'w') as f:
             f.write('*')
-
-# def get_download_url_list(host, m3u8_url, url_list = []):
-#   body = get_m3u8_body(m3u8_url)
-#   ts_url_list = get_url_list(host, body)
-#   for url in ts_url_list:
-#       if url.lower().endswith('.m3u8'):
-#           url_list = get_download_url_list(host, url, url_list)
-#       else:
-#           url_list.append(url)
-#   return url_list
 
 def get_download_url_list(host, m3u8_url, url_list = []):
     body = get_m3u8_body(m3u8_url)
@@ -234,7 +237,7 @@ def configure_logging(level = logging.DEBUG, filename = f'{sys.argv[0]}.log'):
         level=logging.DEBUG,
         format="%(asctime)s %(levelname)s %(filename)s +%(lineno)d - %(message)s",
         handlers=[
-            logging.FileHandler(filename, 'w'),
+            logging.FileHandler(filename, 'w', encoding='utf-8'),
             logging.StreamHandler()
         ]
     )
