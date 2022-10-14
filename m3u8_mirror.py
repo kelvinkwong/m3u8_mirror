@@ -65,7 +65,7 @@ def manifest_parse_fragment(host, manifest, index):
     line = manifest[index]
     keys = []
     url = None
-    data = {}
+    data = {'segment': 0, 'timestamp': 0}
 
     if line.startswith('#'):
         keys.append(line)
@@ -83,7 +83,8 @@ def manifest_parse_fragment(host, manifest, index):
                 if not line.startswith('http'):
                     line = f'{host}/{url}'
 
-                data = {'key': keys, 'url': line}
+                data['key'] = keys
+                data['url'] = line
                 logging.debug(f'parsed: {data}')
                 return index, data
 
@@ -180,17 +181,18 @@ def exit_error(code, description):
     raise SystemExit(code)
 
 def download_googledai_data(url, download_dir, filename_format):
-    curr_path = filename_format % (download_dir, sha1sum(r.content))
+    r = requests.get(url)
+    if r.ok:
+        curr_path = filename_format % (download_dir, sha1sum(r.content))
 
-    if os.path.isfile(curr_path):
-        logging.warning('adpod/key file already exist')
-    else:
-        r = requests.get(url)
-        if r.ok:
-            write_binary(curr_path, r.content)
+        if os.path.isfile(curr_path):
+            logging.warning('adpod/key file already exist')
         else:
-            exit_error(r.status_code, r.text)
-    return curr_path
+            write_binary(curr_path, r.content)
+
+        return curr_path
+    else:
+        exit_error(r.status_code, r.text)
 
 def download_main_data(url, download_dir):
     file_name = url.split('/').pop()
