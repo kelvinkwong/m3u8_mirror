@@ -7,7 +7,6 @@ from urllib.parse import urlparse
 import shutil
 import re
 import time
-import glob
 
 import hashlib
 import mmap
@@ -67,7 +66,8 @@ def get_segment_count(key, segment_counter, timestamp):
     if '#EXTINF' in key:
         #EXTINF:6.00000,
         segment_counter += 1
-        timestamp += timedelta(seconds = float(key[key.rfind(':')+1:-1]))
+        duration = float(key[key.rfind(':')+1:-1])
+        timestamp += timedelta(seconds = duration)
     return segment_counter, timestamp
 
 def get_manifest_timestamp(key):
@@ -120,7 +120,7 @@ def get_manifest_details(host, manifest):
             header.append(line)
         elif '#EXT-X-MEDIA-SEQUENCE' in line:
             header.append(line)
-            segment_counter = int(line[line.rfind(':')+1:])
+            segment_counter = int(line[line.rfind(':')+1:]) - 1
         elif line[:line.rfind(':')] in ['#EXT-X-VERSION', '#EXT-X-TARGETDURATION', '#EXT-X-DISCONTINUITY-SEQUENCE']:
             header.append(line)
         elif '#EXT-X-KEY:METHOD=AES-128' in line:
@@ -141,11 +141,11 @@ def get_manifest_details(host, manifest):
 
     return header, body
 
-def write_manifest(filepath, data):
+def write_manifest(filepath, data, mode = 'a'):
     if isinstance(data, str):
         data = [data]
 
-    with open(filepath, 'a') as f:
+    with open(filepath, mode) as f:
         for d in data:
             logging.debug(f'writing: {d}')
             f.write(d)
@@ -155,11 +155,14 @@ def findAnyStringInList(text, text_list):
     return any(text in item for item in text_list)
 
 def mirror_manifest(header, body, download_dir):
-    ts_path_list = []
-    manifest = f'{download_dir}/manifest.m3u8'
+    segment = [line.get('segment_counter') for line in body if line.get('segment_counter')][0]
+    manifest_single = f'{download_dir}/local/manifest.m3u8'
+    manifest_multi = f'{download_dir}/local/manifest_{segment}.m3u8'
 
-    if not os.path.isfile(manifest):
-        write_manifest(manifest, header)
+    if not os.path.isfile(manifest_single):
+        write_manifest(manifest_single, header)
+    if not os.path.isfile(manifest_multi):
+        write_manifest(manifest_multi, header)
 
     for line in body:
         key = line.get('key')
@@ -170,15 +173,19 @@ def mirror_manifest(header, body, download_dir):
             if path is not None:
                 if isinstance(key, str):
                     key = [key]
-                write_manifest(manifest, key + [path])
+                write_manifest(manifest_single, key + [path])
+                write_manifest(manifest_multi, key + [path])
         elif '#EXT-X-KEY:METHOD=AES-128' in key:
             path = download_data(url, download_dir)
-            write_manifest(manifest, [key + path])
+            write_manifest(manifest_single, [key + path])
+            write_manifest(manifest_multi, [key + path])
         elif 'KEL_NEWLINE' in key:
-            write_manifest(manifest, [''])
+            write_manifest(manifest_single, [''])
+            write_manifest(manifest_multi, [''])
         else:
             logging.debug(f'write as other: {line}')
-            write_manifest(manifest, key)
+            write_manifest(manifest_single, key)
+            write_manifest(manifest_multi, key)
 
 def download_data(url, download_dir):
     logging.debug(f'starting downloading: {url}')
@@ -194,8 +201,8 @@ def download_data(url, download_dir):
         path = download_main_data(url, download_dir)
     return path
 
-def write_binary(path, data):
-    with open(path, 'wb') as f:
+def write_binary(path, data, mode = 'wb'):
+    with open(path, mode) as f:
         f.write(data)
 
 def exit_error(code, description):
@@ -231,38 +238,52 @@ def download_main_data(url, download_dir):
             write_binary(curr_path, r.content)
         else:
             exit_error(r.status_code, r.text)
-        return curr_path
+    return curr_path
 
 def check_dir(path):
     if not os.path.exists(path):
         os.makedirs(path)
+        os.makedirs(path + '/remote')
+        os.makedirs(path + '/local')
 
         with open(f'{path}/.gitignore', 'w') as f:
             f.write('*')
 
-def get_download_url_list(host, m3u8_url, url_list = []):
+def get_download_url_list(host, m3u8_url, save_dir):
     if m3u8_url.startswith('http://') or m3u8_url.startswith('https://'):
         body = get_m3u8_body(m3u8_url)
     else:
         with open(m3u8_url, 'r') as f:
             body = f.read()
-    # if True:
-    #     write_manifest('temp.m3u8', body)
 
+    logging.debug('manifest: raw')
     logging.debug(body)
-    return get_manifest_details(host, body)
+
+    manifest = get_manifest_details(host, body)
+    # logging.debug('manifest: parsed')
+    # logging.debug(manifest[1])
+
+    segment = [line.get('segment_counter') for line in manifest[1] if line.get('segment_counter')][0]
+    write_manifest(f'{save_dir}/remote/manifest_{segment}.m3u8', body, mode = 'w')
+
+    return manifest
+
 
 def download_ts(m3u8_url, save_dir):
     check_dir(save_dir)
     host = get_host(m3u8_url)
     while True:
-        header, body = get_download_url_list(host, m3u8_url)
+        header, body = get_download_url_list(host, m3u8_url, save_dir)
         mirror_manifest(header, body, save_dir)
 
         logging.info(f'total line count: {len(body)}')
-        sleep = 30
-        print(f'[info]: sleeping {sleep}s')
-        time.sleep(sleep)
+        timestamp = [line.get('timestamp') for line in body if line.get('timestamp')]
+
+        # delay = timestamp[-5] - datetime.utcnow() 
+        # delay = abs(int(delay.total_seconds()))
+        delay = 30
+        logging.debug(f'[info]: sleeping {delay}s')
+        time.sleep(delay)
 
 def configure_logging(level = logging.DEBUG, filename = f'{sys.argv[0]}.log'):
     logging.basicConfig(

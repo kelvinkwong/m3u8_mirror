@@ -1,2 +1,4 @@
 m3u8_mirror.py.log
-test.py
+test.*
+temp.*
+*.zip
